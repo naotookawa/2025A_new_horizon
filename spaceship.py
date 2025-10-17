@@ -50,6 +50,21 @@ def feature_engineer(df):
 
     df['IsAlone'] = (df['GroupSize'] == 1).astype(int)
 
+     # --- NEW: Ageのカテゴリ化 ---
+    # 0 < Age <= 12, 12 < Age <= 17, 17 < Age
+    # df['Age'].max() + 1 を使うことで、17歳以上の最大値まで全て含める
+    bins = [0, 12, 17, df['Age'].max() + 1] 
+    labels = ['Child (0-12)', 'Teen (13-17)', 'Adult (18+)' ]
+    
+
+    df['AgeGroup'] = pd.cut(
+        df['Age'], 
+        bins=bins, 
+        labels=labels, 
+        right=True,        # (a, b] の区間設定
+        include_lowest=True # 0を含むように
+    ).astype(object) # カテゴリとして処理するためにobject型に変換
+
     # 元の 'Cabin' は不要なので削除
     df = df.drop('Cabin', axis=1, errors='ignore')
     return df
@@ -62,7 +77,7 @@ X_test = feature_engineer(X_test.copy())
 # --- 2. 特徴量の定義（FE後） ---
 numeric_features = ['Age', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'TotalSpent', 'GroupSize']
 # 新たなカテゴリ特徴量 'Deck', 'Side' を追加
-categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side', 'IsAlone'] 
+categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side', 'IsAlone', 'AgeGroup'] 
 # 'Num' は数値だが、カテゴリ的な性質が強いため、今回はシンプルに無視します（より高度なFEが必要）
 
 # 使用する特徴量のみを選択（PassengerId, Nameなどを除く）
