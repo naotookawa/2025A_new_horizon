@@ -39,10 +39,17 @@ def feature_engineer(df):
     データフレームに特徴量エンジニアリングを適用します。
     - Cabin情報 (Deck, Num, Side) を抽出
     - TotalSpent (総支出額) を計算
+    - PassengerIDからグループごとのIDを抽出
     """
     df[['Deck', 'Num', 'Side']] = df['Cabin'].str.split('/', expand=True)
     df['TotalSpent'] = df[['RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck']].sum(axis=1)
-    
+    df['Group'] = df['PassengerId'].str.split('_', expand=True)[0]
+
+    group_size_map = df.groupby('Group')['PassengerId'].transform('count')
+    df['GroupSize'] = group_size_map
+
+    df['IsAlone'] = (df['GroupSize'] == 1).astype(int)
+
     # 元の 'Cabin' は不要なので削除
     df = df.drop('Cabin', axis=1, errors='ignore')
     return df
@@ -53,9 +60,9 @@ X_test = feature_engineer(X_test.copy())
 
 
 # --- 2. 特徴量の定義（FE後） ---
-numeric_features = ['Age', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'TotalSpent']
+numeric_features = ['Age', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'TotalSpent', 'GroupSize']
 # 新たなカテゴリ特徴量 'Deck', 'Side' を追加
-categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side'] 
+categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side', 'IsAlone'] 
 # 'Num' は数値だが、カテゴリ的な性質が強いため、今回はシンプルに無視します（より高度なFEが必要）
 
 # 使用する特徴量のみを選択（PassengerId, Nameなどを除く）
