@@ -12,8 +12,10 @@ import os
 DATA_DIR = './spaceship-titanic-ut-komaba-2025/'
 TRAIN_FILE = 'train.csv'
 TEST_FILE = 'test.csv'
-OUTPUT_FILE = 'submission_lgbm.csv'
+OUTPUT_FILE = 'submission_cv_lgbm.csv'
 TARGET_COLUMN = 'Transported'
+RANDOM_STATE = 42
+N_SPLITS = 5 # CV分割数
 
 # --- データの読み込み ---
 try:
@@ -31,32 +33,48 @@ X = train_df.drop(TARGET_COLUMN, axis=1)
 y = train_df[TARGET_COLUMN]
 X_test = test_df.copy()
 
-# --- 特徴量の定義 ---
-# 数値特徴量: 欠損値補完後にスケーリング
-numeric_features = ['Age', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck']
-# カテゴリ特徴量: 欠損値補完後にOne-Hot Encoding
-categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP']
+# --- 1. 特徴量エンジニアリング関数 ---
+def feature_engineer(df):
+    """
+    データフレームに特徴量エンジニアリングを適用します。
+    - Cabin情報 (Deck, Num, Side) を抽出
+    - TotalSpent (総支出額) を計算
+    """
+    df[['Deck', 'Num', 'Side']] = df['Cabin'].str.split('/', expand=True)
+    df['TotalSpent'] = df[['RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck']].sum(axis=1)
+    
+    # 元の 'Cabin' は不要なので削除
+    df = df.drop('Cabin', axis=1, errors='ignore')
+    return df
 
-# シンプルな特徴量セットを使用
+# 特徴量エンジニアリングの適用
+X = feature_engineer(X.copy())
+X_test = feature_engineer(X_test.copy())
+
+
+# --- 2. 特徴量の定義（FE後） ---
+numeric_features = ['Age', 'RoomService', 'FoodCourt', 'ShoppingMall', 'Spa', 'VRDeck', 'TotalSpent']
+# 新たなカテゴリ特徴量 'Deck', 'Side' を追加
+categorical_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side'] 
+# 'Num' は数値だが、カテゴリ的な性質が強いため、今回はシンプルに無視します（より高度なFEが必要）
+
+# 使用する特徴量のみを選択（PassengerId, Nameなどを除く）
 all_features = numeric_features + categorical_features
-X = X[all_features]
+X_processed = X[all_features]
 X_test_processed = X_test[all_features]
 
-# --- 前処理 Pipeline の定義 ---
 
-# 数値特徴量の処理
+# --- 3. 前処理 Pipeline の定義（共通） ---
 numerical_transformer = Pipeline(steps=[
     ('imputer', SimpleImputer(strategy='median')),
     ('scaler', StandardScaler())
 ])
 
-# カテゴリ特徴量の処理
 categorical_transformer = Pipeline(steps=[
     ('imputer', SimpleImputer(strategy='most_frequent')),
-    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False)) # sparse_output=Falseで密行列を生成
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
 ])
 
-# ColumnTransformerで特徴量ごとに異なる前処理を適用
 preprocessor = ColumnTransformer(
     transformers=[
         ('num', numerical_transformer, numeric_features),
@@ -64,42 +82,101 @@ preprocessor = ColumnTransformer(
     ]
 )
 
-# --- モデル定義と全体の Pipeline 構築 ---
+# --- 4. CV評価関数 ---
+def evaluate_lgbm_config(params, X_data, y_data):
+    """
+    与えられたLightGBMパラメータでクロスバリデーションを実行し、スコアを返します。
+    """
+    print(f"\n--- CV評価開始: Params = {params} ---")
+    
+    # LightGBMモデルの定義 (渡されたparamsを使用)
+    lgbm_model = lgb.LGBMClassifier(
+        random_state=RANDOM_STATE, 
+        n_estimators=1000, 
+        n_jobs=-1, 
+        objective='binary', 
+        verbose=-1,
+        **params # パラメータを展開
+    )
 
-# LightGBMモデルの定義 (分類問題のため'binary'を使用)
-# random_stateを設定し再現性を確保
-lgbm_model = lgb.LGBMClassifier(random_state=42, n_estimators=1000, n_jobs=-1, objective='binary', verbose=-1)
+    # 全体の Pipeline
+    full_pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', lgbm_model)
+    ])
 
-# 全体の Pipeline: 前処理 -> LightGBMモデル
-full_pipeline = Pipeline(steps=[
+    # StratifiedKFold
+    cv = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+
+    # クロスバリデーションの実行
+    cv_scores = cross_val_score(full_pipeline, X_data, y_data, cv=cv, scoring='accuracy', n_jobs=-1)
+    
+    mean_score = cv_scores.mean()
+    std_score = cv_scores.std()
+
+    print("--- CVスコア結果 ---")
+    print(f"各CVのAccuracy: {cv_scores}")
+    print(f"平均Accuracy: {mean_score:.4f} (±{std_score:.4f})")
+    
+    return mean_score, std_score, lgbm_model
+
+
+# --- 5. 実験と最良モデルの選択 ---
+print("--- ステップ1: クロスバリデーションによるハイパーパラメータ実験開始 ---")
+
+# (A) ベースライン設定 (現在のデフォルト設定)
+params_baseline = {} 
+
+# (B) チューニング設定 (例: 学習率を下げ、木の深さを制限して汎化性能を向上)
+params_tuned = {
+    'learning_rate': 0.01,
+    'max_depth': 7,
+    'num_leaves': 31,
+    'reg_alpha': 0.1 # L1正則化
+}
+
+results = {}
+best_score = -1
+best_model_params = None
+
+# 実験の実行
+for name, params in [('Baseline', params_baseline), ('Tuned', params_tuned)]:
+    mean, std, model = evaluate_lgbm_config(params, X_processed, y)
+    results[name] = {'mean_score': mean, 'std_score': std, 'model': model, 'params': params}
+    
+    if mean > best_score:
+        best_score = mean
+        best_model_params = params
+        
+print("\n" + "="*50)
+print(f"⭐ 最良のCVスコア: {best_score:.4f}")
+print(f"⭐ 選択された設定: {best_model_params}")
+print("="*50)
+
+# --- 6. ステップ2: 最良モデルでの最終学習と予測生成 ---
+
+# 最良の設定で最終的なパイプラインを構築
+best_lgbm_model = lgb.LGBMClassifier(
+    random_state=RANDOM_STATE, 
+    n_estimators=1000, 
+    n_jobs=-1, 
+    objective='binary', 
+    verbose=-1,
+    **best_model_params
+)
+
+final_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor),
-    ('classifier', lgbm_model)
+    ('classifier', best_lgbm_model)
 ])
 
-# --- ステップ1: クロスバリデーションによる手元でのスコア確認 ---
 
-# StratifiedKFold (分類問題に適した分割)
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-# クロスバリデーションの実行 (Accuracyを評価)
-# `X` と `y` を渡すと、Pipelineが自動的に前処理も適用しながら交差検証を行います。
-print("--- ステップ1: 5分割クロスバリデーション開始 ---")
-cv_scores = cross_val_score(full_pipeline, X, y, cv=cv, scoring='accuracy', n_jobs=-1)
-
-print("--- クロスバリデーションスコア ---")
-print(f"各CVのAccuracy: {cv_scores}")
-print(f"平均Accuracy: {cv_scores.mean():.4f} (±{cv_scores.std():.4f})")
-
-# --- ステップ2: 全データで再学習し、test.csvに対する出力を生成 ---
-
-# 全学習データでPipelineを再学習
-print("\n--- ステップ2: 全学習データで再学習 ---")
-full_pipeline.fit(X, y)
+print("\n--- ステップ2: 最良設定で全学習データで再学習 ---")
+final_pipeline.fit(X_processed, y)
 print("学習完了。")
 
 # testデータで予測
-# LightGBMはデフォルトでクラス確率（float）を返すため、`predict`でクラスラベル（0または1）を取得
-test_predictions = full_pipeline.predict(X_test_processed)
+test_predictions = final_pipeline.predict(X_test_processed)
 
 # 予測結果を True/False のブール値に戻す
 predicted_transported = test_predictions.astype(bool)
