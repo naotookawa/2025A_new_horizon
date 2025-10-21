@@ -151,10 +151,14 @@ params_baseline = {}
 
 # (B) チューニング設定 (例: 学習率を下げ、木の深さを制限して汎化性能を向上)
 params_tuned = {
-    'learning_rate': 0.01,
-    'max_depth': 7,
-    'num_leaves': 31,
-    'reg_alpha': 0.1 # L1正則化
+    'learning_rate': 0.015045884263884837,
+    'max_depth': 4,
+    'num_leaves': 46,
+    'reg_alpha': 0.0012331367058110389,
+    'reg_lambda': 0.000153443533884356,
+    'min_child_samples': 17,
+    'subsample': 0.8449842887788588,
+    'colsample_bytree': 0.8597784530564854
 }
 
 results = {}
